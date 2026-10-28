@@ -14,6 +14,8 @@
  *   bun index.ts profile qr [name]
  *   bun index.ts profile remove <name>
  *
+ *   bun index.ts rekey                          (rotate WALLET_MASTER_KEY; see env vars)
+ *
  *   bun index.ts balance [name]                 (defaults to active profile)
  *   bun index.ts transactions [name] [--limit N] [--all] [--type trx|usdt|trc20|all] [--json]
  *   bun index.ts send-trx <to> <amount> [--profile name]
@@ -22,6 +24,7 @@
  *
  * Env vars:
  *   WALLET_MASTER_KEY   optional passphrase to encrypt private keys at rest
+ *   WALLET_NEW_MASTER_KEY  new passphrase, used only by the rekey command
  *   TRONGRID_API_KEY    optional, recommended for higher rate limits
  *   TRON_FULL_HOST      optional, defaults to https://api.trongrid.io
  *   TRONGRID_API_HOST   optional, host for the v1 REST API (tx history)
@@ -35,9 +38,18 @@ import {
   deleteProfile,
   setSetting,
   getActiveProfileName,
+  replaceProfileKeys,
   DB_PATH,
 } from "./lib/db";
-import { encryptSecret, decryptSecret, isEncryptionEnabled } from "./lib/crypto";
+import {
+  encryptSecret,
+  decryptSecret,
+  encryptSecretWith,
+  decryptSecretWith,
+  isEncryptionEnabled,
+} from "./lib/crypto";
+import { copyFileSync, mkdirSync, existsSync } from "fs";
+import { join } from "path";
 import { buildTronWeb, generateKeypair, USDT_CONTRACT } from "./lib/tron";
 import { renderQrToTerminal } from "./lib/qr";
 import { fetchHistory, type HistoryEntry } from "./lib/history";
@@ -68,6 +80,10 @@ Profile commands:
   profile show <name> [--reveal]      Show a profile's address (and key with --reveal)
   profile qr [name]                   Render the address as a scannable QR code
   profile remove <name>               Delete a profile
+
+Maintenance commands:
+  rekey                               Rotate WALLET_MASTER_KEY to WALLET_NEW_MASTER_KEY
+                                      (re-encrypts all profiles, backs up the DB first)
 
 Wallet commands:
   balance [name]                      Show TRX + USDT balance (active profile if omitted)
@@ -239,6 +255,76 @@ function cmdProfileRemove(name?: string) {
     setSetting("active_profile", "");
   }
   console.log(`Removed profile "${name}"`);
+}
+
+const MIN_NEW_KEY_LENGTH = 16;
+
+function cmdRekey() {
+  const oldKey = process.env.WALLET_MASTER_KEY;
+  const newKey = process.env.WALLET_NEW_MASTER_KEY;
+
+  if (!newKey) {
+    console.error("WALLET_NEW_MASTER_KEY is not set. Export the new passphrase, then run 'rekey' again.");
+    process.exit(1);
+  }
+  if (newKey === oldKey) {
+    console.error("WALLET_NEW_MASTER_KEY must differ from WALLET_MASTER_KEY.");
+    process.exit(1);
+  }
+  if (newKey.length < MIN_NEW_KEY_LENGTH) {
+    console.error(`WALLET_NEW_MASTER_KEY must be at least ${MIN_NEW_KEY_LENGTH} characters.`);
+    process.exit(1);
+  }
+
+  const profiles = listProfiles();
+  if (profiles.length === 0) {
+    console.error("No profiles to rekey.");
+    process.exit(1);
+  }
+  if (!oldKey && profiles.some((p) => p.encrypted)) {
+    console.error("WALLET_MASTER_KEY is not set, but some profiles are encrypted. Set the current passphrase.");
+    process.exit(1);
+  }
+
+  // Decrypt and verify everything in memory before touching the DB or disk.
+  const tronWeb = buildTronWeb();
+  const updates: { name: string; private_key: string }[] = [];
+  for (const p of profiles) {
+    let plain: string;
+    try {
+      plain = p.encrypted ? decryptSecretWith(oldKey as string, p.private_key) : p.private_key;
+    } catch {
+      console.error(`Could not decrypt profile "${p.name}" with WALLET_MASTER_KEY. Nothing was changed.`);
+      process.exit(1);
+    }
+    let derived: string;
+    try {
+      derived = tronWeb.address.fromPrivateKey(plain);
+    } catch {
+      console.error(`Profile "${p.name}" holds an invalid private key. Nothing was changed.`);
+      process.exit(1);
+    }
+    if (derived !== p.address) {
+      console.error(`Profile "${p.name}": derived address does not match the stored address. Nothing was changed.`);
+      process.exit(1);
+    }
+    updates.push({ name: p.name, private_key: encryptSecretWith(newKey, plain) });
+  }
+
+  const backupDir = join(import.meta.dir, "backups");
+  if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupPath = join(backupDir, `wallet-${stamp}.db`);
+  copyFileSync(DB_PATH, backupPath);
+  console.log(`Backup written: ${backupPath}`);
+
+  replaceProfileKeys(updates);
+
+  console.log(`Rekeyed ${updates.length} profile${updates.length === 1 ? "" : "s"}.`);
+  console.log(`\nNext steps:`);
+  console.log(`  - Set WALLET_MASTER_KEY to the new passphrase now; the old one no longer decrypts the DB.`);
+  console.log(`  - The backup is still encrypted with the OLD key. Delete it once you are satisfied.`);
+  console.log(`  - Rotating the passphrase does not protect copies of the DB already encrypted under the old one.`);
 }
 
 // --- wallet commands ------------------------------------------------------
@@ -543,6 +629,11 @@ async function main() {
         default:
           printUsage();
       }
+      return;
+    }
+
+    if (command === "rekey") {
+      cmdRekey();
       return;
     }
 

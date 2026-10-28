@@ -65,6 +65,19 @@ export function deleteProfile(name: string) {
   db.run(`DELETE FROM profiles WHERE name = ?`, [name]);
 }
 
+// Replaces the stored private keys of many profiles in one transaction, so a
+// failure part-way leaves every row untouched. Rows are marked encrypted.
+export function replaceProfileKeys(updates: { name: string; private_key: string }[]) {
+  const stmt = db.prepare(`UPDATE profiles SET private_key = ?, encrypted = 1 WHERE name = ?`);
+  const apply = db.transaction((rows: { name: string; private_key: string }[]) => {
+    for (const row of rows) {
+      const result = stmt.run(row.private_key, row.name);
+      if (result.changes !== 1) throw new Error(`Profile "${row.name}" was not updated.`);
+    }
+  });
+  apply(updates);
+}
+
 export function setSetting(key: string, value: string) {
   db.run(
     `INSERT INTO settings (key, value) VALUES (?, ?)

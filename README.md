@@ -211,6 +211,23 @@ bun index.ts profile add prod-wallet
 DB become unrecoverable. Back up your master key and/or exported private
 keys separately.
 
+### Rotating the passphrase (`rekey`)
+
+```bash
+export WALLET_MASTER_KEY="current passphrase"
+export WALLET_NEW_MASTER_KEY="new passphrase, 16+ characters"
+tron-wallet rekey
+```
+
+`rekey` copies the DB to `backups/wallet-<timestamp>.db`, decrypts every profile
+with the old key, checks that each private key still derives its stored address,
+then re-encrypts all of them in one SQLite transaction. If any profile fails,
+nothing is changed. Secrets are read from the environment only, never from
+arguments. Afterwards, set `WALLET_MASTER_KEY` to the new value. The backup is
+still encrypted with the OLD key, so delete it once you are satisfied. Rotating
+the passphrase does not protect copies of the DB that were already encrypted
+under the old one.
+
 ## Making it globally runnable (optional)
 
 ```bash
