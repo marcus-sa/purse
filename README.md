@@ -1,7 +1,8 @@
 # tron-wallet-cli (Bun edition)
 
-Multi-profile Tron wallet CLI using Bun and `bun:sqlite`. Generate keypairs,
-store multiple named profiles locally, and send TRX / TRC-20 USDT.
+Multi-profile Tron + Solana wallet CLI using Bun and `bun:sqlite`. Generate
+keypairs, store multiple named profiles locally, and send TRX / TRC-20 USDT
+or SOL / SPL USDT / USDC.
 
 ## Setup
 
@@ -10,6 +11,7 @@ bun install
 cp .env.example .env
 # optionally set WALLET_MASTER_KEY in .env to encrypt private keys at rest
 # optionally set TRONGRID_API_KEY (free at https://www.trongrid.io/)
+# optionally set SOLANA_RPC_URL to a dedicated Solana RPC provider
 ```
 
 Profiles are stored in a local SQLite DB at `~/.tron-wallet-cli/wallet.db`
@@ -18,12 +20,20 @@ by default. Override the location with `WALLET_DATA_DIR` — see
 
 ## Profile management
 
+Every profile belongs to one chain, `tron` (the default) or `solana`.
+Commands act on the chain of the profile they use.
+
 ```bash
 # Create a new profile (generates a fresh keypair)
 bun index.ts profile add alice
+bun index.ts profile add carol --chain solana
 
 # Import an existing private key as a profile
 bun index.ts profile import bob <privateKeyHex>
+
+# Solana keys: base58 (Phantom/Solflare export), a JSON byte array, or a
+# solana-keygen keyfile path — the file form keeps the key out of shell history
+bun index.ts profile import dave ~/.config/solana/id.json --chain solana
 
 # List all profiles (marks the active one with *)
 bun index.ts profile list
@@ -69,6 +79,11 @@ bun index.ts send-usdt <toAddress> <amount> --profile alice
 
 # Raise or lower the most TRX a USDT send may burn on energy (default 50)
 bun index.ts send-usdt <toAddress> <amount> --fee-limit 30
+
+# Solana profiles: send-usdt sends SPL USDT; send-sol and send-usdc are Solana-only
+bun index.ts send-usdt <toAddress> <amount> --profile carol
+bun index.ts send-sol <toAddress> <amount> --profile carol
+bun index.ts send-usdc <toAddress> <amount> --profile carol
 
 # Check the current rate without swapping anything
 bun index.ts swap trx-usdt 100 --quote
@@ -150,6 +165,35 @@ The `--reserve` default keeps 30 TRX back on `trx-usdt` swaps. Swapping a whole
 balance leaves nothing to pay the next transaction's bandwidth and energy with,
 which is an easy way to strand an account. Set `--reserve 0` if you know what
 you're doing.
+
+### Solana
+
+Solana profiles support `balance` (SOL, USDT, USDC), `send-sol`, `send-usdt`,
+`send-usdc`, QR codes and `rekey`. `transactions` and `swap` are Tron-only
+for now.
+
+Fees are paid in SOL and are tiny: a stablecoin transfer costs about
+0.000015 SOL. The one larger cost is a recipient who has never held that
+token — they have no token account yet, so the sender pays its rent
+(~0.002 SOL, one-time per recipient and token). The CLI creates it
+automatically and says so.
+
+| Option | Meaning |
+| --- | --- |
+| `--priority-fee <microlamports>` | Priority fee per compute unit (default `50000`, well under 0.0001 SOL per transfer). Raise it if transactions are dropped when the network is busy |
+| `--profile <name>` | Profile to use, instead of the active one |
+
+Checks before anything is signed:
+
+- the recipient must be a wallet address — token-account and program
+  addresses are refused, since funds sent there are usually unrecoverable;
+- the first SOL transfer to an empty account must cover the rent-exempt
+  minimum (~0.00089 SOL), or the network rejects it;
+- balances must cover the amount. Transactions are also simulated before
+  broadcast, so a transfer that would fail costs nothing.
+
+`SOLANA_RPC_URL` defaults to the public mainnet endpoint, which is rate
+limited; point it at a provider (Helius, QuickNode, ...) for heavier use.
 
 ## Storing the DB on Proton Drive (macOS)
 

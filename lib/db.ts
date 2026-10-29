@@ -30,6 +30,12 @@ db.run(`
   )
 `);
 
+// Profiles predating Solana support have no chain column; they are all Tron.
+const profileColumns = db.query(`PRAGMA table_info(profiles)`).all() as { name: string }[];
+if (!profileColumns.some((c) => c.name === "chain")) {
+  db.run(`ALTER TABLE profiles ADD COLUMN chain TEXT NOT NULL DEFAULT 'tron'`);
+}
+
 db.run(`
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -37,8 +43,17 @@ db.run(`
   )
 `);
 
+export type Chain = "tron" | "solana";
+
+export const CHAINS: readonly Chain[] = ["tron", "solana"];
+
+export function isChain(value: string): value is Chain {
+  return (CHAINS as readonly string[]).includes(value);
+}
+
 export interface Profile {
   name: string;
+  chain: Chain;
   address: string;
   private_key: string;
   encrypted: number;
@@ -47,8 +62,8 @@ export interface Profile {
 
 export function insertProfile(profile: Omit<Profile, "created_at">) {
   db.run(
-    `INSERT INTO profiles (name, address, private_key, encrypted, created_at) VALUES (?, ?, ?, ?, ?)`,
-    [profile.name, profile.address, profile.private_key, profile.encrypted, new Date().toISOString()]
+    `INSERT INTO profiles (name, chain, address, private_key, encrypted, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    [profile.name, profile.chain, profile.address, profile.private_key, profile.encrypted, new Date().toISOString()]
   );
 }
 

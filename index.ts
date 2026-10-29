@@ -3,11 +3,12 @@
 /**
  * tron-wallet-cli (Bun edition)
  *
- * Multi-profile Tron wallet CLI backed by bun:sqlite.
+ * Multi-profile Tron + Solana wallet CLI backed by bun:sqlite. Each profile
+ * belongs to one chain; commands act on the chain of the profile they use.
  *
  * Usage:
- *   bun index.ts profile add <name>
- *   bun index.ts profile import <name> <privateKeyHex>
+ *   bun index.ts profile add <name> [--chain tron|solana]
+ *   bun index.ts profile import <name> <privateKey|keyfile> [--chain tron|solana]
  *   bun index.ts profile list
  *   bun index.ts profile use <name>
  *   bun index.ts profile show <name> [--reveal]
@@ -19,8 +20,10 @@
  *   bun index.ts balance [name]                 (defaults to active profile)
  *   bun index.ts transactions [name] [--limit N] [--all] [--type trx|usdt|trc20|all] [--json]
  *   bun index.ts send-trx <to> <amount> [--profile name]
- *   bun index.ts send-usdt <to> <amount> [--fee-limit trx] [--profile name]
- *   bun index.ts swap <trx-usdt|usdt-trx> <amount> [--slippage n] [--quote]
+ *   bun index.ts send-usdt <to> <amount> [--fee-limit trx] [--priority-fee n] [--profile name]
+ *   bun index.ts send-sol <to> <amount> [--priority-fee n] [--profile name]
+ *   bun index.ts send-usdc <to> <amount> [--priority-fee n] [--profile name]
+ *   bun index.ts swap <trx-usdt|usdt-trx> <amount> [--slippage n] [--quote]   (Tron only)
  *
  * Env vars:
  *   WALLET_MASTER_KEY   optional passphrase to encrypt private keys at rest
@@ -28,6 +31,7 @@
  *   TRONGRID_API_KEY    optional, recommended for higher rate limits
  *   TRON_FULL_HOST      optional, defaults to https://api.trongrid.io
  *   TRONGRID_API_HOST   optional, host for the v1 REST API (tx history)
+ *   SOLANA_RPC_URL      optional, defaults to https://api.mainnet-beta.solana.com
  *   WALLET_DATA_DIR     optional, defaults to ~/.tron-wallet-cli
  */
 
@@ -39,7 +43,11 @@ import {
   setSetting,
   getActiveProfileName,
   replaceProfileKeys,
+  isChain,
+  CHAINS,
   DB_PATH,
+  type Chain,
+  type Profile,
 } from "./lib/db";
 import {
   encryptSecret,
@@ -48,10 +56,25 @@ import {
   decryptSecretWith,
   isEncryptionEnabled,
 } from "./lib/crypto";
-import { copyFileSync, mkdirSync, existsSync } from "fs";
+import { copyFileSync, mkdirSync, existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { buildTronWeb, generateKeypair, USDT_CONTRACT } from "./lib/tron";
 import { renderQrToTerminal } from "./lib/qr";
+import {
+  DEFAULT_PRIORITY_FEE,
+  buildConnection,
+  generateSolanaKeypair,
+  getSolBalance,
+  getTokenBalance,
+  isSolanaAddress,
+  isWalletAddress,
+  keypairFromSecret,
+  parseSolanaSecret,
+  rentExemptMinimum,
+  sendSol,
+  sendToken,
+  type SolanaToken,
+} from "./lib/solana";
 import { fetchHistory, type HistoryEntry } from "./lib/history";
 import {
   DEFAULT_TRX_RESERVE,
@@ -73,8 +96,10 @@ function printUsage() {
 tron-wallet-cli (Bun) — DB: ${DB_PATH}
 
 Profile commands:
-  profile add <name>                  Generate a new keypair and save as a profile
-  profile import <name> <privKeyHex>  Import an existing private key as a profile
+  profile add <name> [--chain c]      Generate a new keypair (chain: tron or solana, default tron)
+  profile import <name> <key> [--chain c]
+                                      Import a private key: hex for Tron; base58, a JSON
+                                      byte array, or a solana-keygen file for Solana
   profile list                        List all profiles (marks the active one)
   profile use <name>                  Set the active profile
   profile show <name> [--reveal]      Show a profile's address (and key with --reveal)
@@ -86,18 +111,21 @@ Maintenance commands:
                                       (re-encrypts all profiles, backs up the DB first)
 
 Wallet commands:
-  balance [name]                      Show TRX + USDT balance (active profile if omitted)
-  transactions [name] [options]       Show transaction history (aliases: txs, history)
+  balance [name]                      Show TRX + USDT, or SOL + USDT + USDC (active profile if omitted)
+  transactions [name] [options]       Show transaction history (aliases: txs, history; Tron only)
       --limit <n>                       Number of transactions to show (default 20)
       --all                             Fetch the complete history, no limit
       --type <trx|usdt|trc20|all>       Filter by transfer type (default all)
       --json                            Print raw JSON instead of a table
       --profile <name>                  Profile to use
   send-trx <to> <amount> [--profile name]
-  send-usdt <to> <amount> [options]
-      --fee-limit <trx>                 Max TRX to burn on energy (default ${DEFAULT_USDT_FEE_LIMIT})
+  send-usdt <to> <amount> [options]   Tron or Solana, following the profile's chain
+      --fee-limit <trx>                 Tron: max TRX to burn on energy (default ${DEFAULT_USDT_FEE_LIMIT})
+      --priority-fee <microlamports>    Solana: priority fee per compute unit (default ${DEFAULT_PRIORITY_FEE})
       --profile <name>                  Profile to use
-  swap <trx-usdt|usdt-trx> <amount> [options]
+  send-sol <to> <amount> [--priority-fee n] [--profile name]
+  send-usdc <to> <amount> [--priority-fee n] [--profile name]
+  swap <trx-usdt|usdt-trx> <amount> [options]   (Tron only)
       --quote                           Print the current rate without swapping
       --slippage <percent>              Max acceptable slippage (default 0.5)
       --reserve <trx>                   TRX held back for fees (default ${DEFAULT_TRX_RESERVE})
@@ -134,11 +162,33 @@ function requireProfile(name: string) {
   return profile;
 }
 
+function requireChain(profile: Profile, chain: Chain, command: string) {
+  if (profile.chain !== chain) {
+    console.error(`'${command}' only works with ${chain} profiles; "${profile.name}" is a ${profile.chain} profile.`);
+    process.exit(1);
+  }
+}
+
+function parseChain(value: string | undefined): Chain {
+  const chain = (value ?? "tron").toLowerCase();
+  if (!isChain(chain)) {
+    console.error(`--chain must be one of: ${CHAINS.join(", ")}`);
+    process.exit(1);
+  }
+  return chain;
+}
+
+/** Address for a stored key, used to validate imports and rekeys. Throws on a bad key. */
+function deriveAddress(chain: Chain, privateKey: string): string {
+  if (chain === "solana") return keypairFromSecret(privateKey).publicKey.toBase58();
+  return buildTronWeb().address.fromPrivateKey(privateKey);
+}
+
 // --- profile commands ---------------------------------------------------
 
-function cmdProfileAdd(name?: string) {
+function cmdProfileAdd(name?: string, chain: Chain = "tron") {
   if (!name) {
-    console.error("Usage: profile add <name>");
+    console.error("Usage: profile add <name> [--chain tron|solana]");
     process.exit(1);
   }
   if (getProfile(name)) {
@@ -146,26 +196,27 @@ function cmdProfileAdd(name?: string) {
     process.exit(1);
   }
 
-  const { address, privateKey } = generateKeypair();
+  const { address, privateKey } = chain === "solana" ? generateSolanaKeypair() : generateKeypair();
   const stored = isEncryptionEnabled() ? encryptSecret(privateKey) : privateKey;
 
-  insertProfile({ name, address, private_key: stored, encrypted: isEncryptionEnabled() ? 1 : 0 });
+  insertProfile({ name, chain, address, private_key: stored, encrypted: isEncryptionEnabled() ? 1 : 0 });
 
   if (!getActiveProfileName()) {
     setSetting("active_profile", name);
   }
 
-  console.log(`Created profile "${name}"`);
+  console.log(`Created ${chain} profile "${name}"`);
   console.log(`  Address: ${address}`);
   if (!isEncryptionEnabled()) {
     console.log(`  Private key stored in plaintext (set WALLET_MASTER_KEY to encrypt).`);
   }
-  console.log(`\nFund this address with a small amount of TRX before sending anything.`);
+  const gas = chain === "solana" ? "SOL" : "TRX";
+  console.log(`\nFund this address with a small amount of ${gas} before sending anything.`);
 }
 
-function cmdProfileImport(name?: string, privateKeyHex?: string) {
-  if (!name || !privateKeyHex) {
-    console.error("Usage: profile import <name> <privateKeyHex>");
+function cmdProfileImport(name?: string, keyArg?: string, chain: Chain = "tron") {
+  if (!name || !keyArg) {
+    console.error("Usage: profile import <name> <privateKey|keyfile> [--chain tron|solana]");
     process.exit(1);
   }
   if (getProfile(name)) {
@@ -173,23 +224,32 @@ function cmdProfileImport(name?: string, privateKeyHex?: string) {
     process.exit(1);
   }
 
-  const tronWeb = buildTronWeb();
+  // Reading the key from a file (e.g. solana-keygen's id.json) keeps it out
+  // of shell history.
+  const rawKey = existsSync(keyArg) ? readFileSync(keyArg, "utf8").trim() : keyArg;
+
   let address: string;
+  let privateKey: string;
   try {
-    address = tronWeb.address.fromPrivateKey(privateKeyHex);
+    if (chain === "solana") {
+      ({ address, privateKey } = parseSolanaSecret(rawKey));
+    } else {
+      privateKey = rawKey;
+      address = deriveAddress("tron", rawKey);
+    }
   } catch {
-    console.error("Invalid private key.");
+    console.error(`Invalid ${chain} private key.`);
     process.exit(1);
   }
 
-  const stored = isEncryptionEnabled() ? encryptSecret(privateKeyHex) : privateKeyHex;
-  insertProfile({ name, address: address!, private_key: stored, encrypted: isEncryptionEnabled() ? 1 : 0 });
+  const stored = isEncryptionEnabled() ? encryptSecret(privateKey!) : privateKey!;
+  insertProfile({ name, chain, address: address!, private_key: stored, encrypted: isEncryptionEnabled() ? 1 : 0 });
 
   if (!getActiveProfileName()) {
     setSetting("active_profile", name);
   }
 
-  console.log(`Imported profile "${name}"`);
+  console.log(`Imported ${chain} profile "${name}"`);
   console.log(`  Address: ${address}`);
 }
 
@@ -203,9 +263,11 @@ function cmdProfileList() {
   }
 
   console.log("Profiles:");
+  const nameWidth = Math.max(...profiles.map((p) => p.name.length));
   for (const p of profiles) {
     const marker = p.name === active ? "*" : " ";
-    console.log(`  ${marker} ${p.name}  ${p.address}${p.encrypted ? "  (encrypted)" : ""}`);
+    const chain = p.chain.padEnd(6);
+    console.log(`  ${marker} ${p.name.padEnd(nameWidth)}  ${chain}  ${p.address}${p.encrypted ? "  (encrypted)" : ""}`);
   }
 }
 
@@ -226,6 +288,7 @@ function cmdProfileShow(name?: string, reveal = false, qr = false) {
   }
   const profile = requireProfile(name);
   console.log(`Profile: ${profile.name}`);
+  console.log(`  Chain:   ${profile.chain}`);
   console.log(`  Address: ${profile.address}`);
   console.log(`  Created: ${profile.created_at}`);
   console.log(`  Encrypted at rest: ${profile.encrypted ? "yes" : "no"}`);
@@ -289,7 +352,6 @@ function cmdRekey() {
   }
 
   // Decrypt and verify everything in memory before touching the DB or disk.
-  const tronWeb = buildTronWeb();
   const updates: { name: string; private_key: string }[] = [];
   for (const p of profiles) {
     let plain: string;
@@ -301,7 +363,7 @@ function cmdRekey() {
     }
     let derived: string;
     try {
-      derived = tronWeb.address.fromPrivateKey(plain);
+      derived = deriveAddress(p.chain, plain);
     } catch {
       console.error(`Profile "${p.name}" holds an invalid private key. Nothing was changed.`);
       process.exit(1);
@@ -334,6 +396,21 @@ function cmdRekey() {
 async function cmdBalance(nameArg?: string) {
   const name = resolveProfileName(nameArg);
   const profile = requireProfile(name);
+
+  if (profile.chain === "solana") {
+    const connection = buildConnection();
+    const [sol, usdt, usdc] = await Promise.all([
+      getSolBalance(connection, profile.address),
+      getTokenBalance(connection, profile.address, "USDT"),
+      getTokenBalance(connection, profile.address, "USDC"),
+    ]);
+    console.log(`Profile: ${profile.name} (${profile.address})`);
+    console.log(`  SOL:  ${sol}`);
+    console.log(`  USDT: ${usdt}`);
+    console.log(`  USDC: ${usdc}`);
+    return;
+  }
+
   const tronWeb = buildTronWeb();
   // Constant-contract calls (balanceOf) require an owner_address; without a
   // private key the only address we have is the profile's own.
@@ -402,6 +479,7 @@ function printHistoryTable(entries: HistoryEntry[]) {
 async function cmdTransactions(nameArg?: string, options: TransactionsOptions = { limit: 20, type: "all", json: false }) {
   const name = resolveProfileName(nameArg);
   const profile = requireProfile(name);
+  requireChain(profile, "tron", "transactions");
 
   const entries = await fetchHistory(profile.address, { limit: options.limit, type: options.type });
 
@@ -442,6 +520,7 @@ async function cmdSendTrx(toAddress?: string, amountStr?: string, profileName?: 
 
   const name = resolveProfileName(profileName);
   const profile = requireProfile(name);
+  requireChain(profile, "tron", "send-trx");
   const privateKey = getPrivateKeyPlaintext(profile);
   const tronWeb = buildTronWeb(privateKey);
 
@@ -458,14 +537,16 @@ const DEFAULT_USDT_FEE_LIMIT = 50;
 // Protocol maximum for fee_limit.
 const MAX_FEE_LIMIT = 15_000;
 
-async function cmdSendUsdt(
-  toAddress?: string,
-  amountStr?: string,
-  profileName?: string,
-  feeLimitTrx = DEFAULT_USDT_FEE_LIMIT
-) {
+interface SendUsdtOptions {
+  profile?: string;
+  feeLimit: number;
+  priorityFee: number;
+}
+
+async function cmdSendUsdt(toAddress?: string, amountStr?: string, opts?: SendUsdtOptions) {
+  const { feeLimit: feeLimitTrx, priorityFee } = opts!;
   if (!toAddress || !amountStr) {
-    console.error("Usage: send-usdt <toAddress> <amount> [--fee-limit trx] [--profile name]");
+    console.error("Usage: send-usdt <toAddress> <amount> [--fee-limit trx] [--priority-fee n] [--profile name]");
     process.exit(1);
   }
   const amount = parseFloat(amountStr);
@@ -474,8 +555,13 @@ async function cmdSendUsdt(
     process.exit(1);
   }
 
-  const name = resolveProfileName(profileName);
+  const name = resolveProfileName(opts!.profile);
   const profile = requireProfile(name);
+  if (profile.chain === "solana") {
+    await sendSolanaToken(profile, "USDT", toAddress, amountStr, priorityFee);
+    return;
+  }
+
   const privateKey = getPrivateKeyPlaintext(profile);
   const tronWeb = buildTronWeb(privateKey);
 
@@ -487,6 +573,99 @@ async function cmdSendUsdt(
   });
   console.log(`Sent from profile "${profile.name}" (${profile.address})`);
   console.log("Transaction ID:", tx);
+}
+
+// --- solana sends ---------------------------------------------------------
+
+function parseSendArgs(command: string, toAddress?: string, amountStr?: string): { to: string; amount: number } {
+  if (!toAddress || !amountStr) {
+    console.error(`Usage: ${command} <toAddress> <amount> [--priority-fee n] [--profile name]`);
+    process.exit(1);
+  }
+  const amount = parseFloat(amountStr);
+  if (Number.isNaN(amount) || amount <= 0) {
+    console.error("Amount must be a positive number.");
+    process.exit(1);
+  }
+  if (!isSolanaAddress(toAddress)) {
+    console.error(`"${toAddress}" is not a Solana address.`);
+    process.exit(1);
+  }
+  if (!isWalletAddress(toAddress)) {
+    console.error(`"${toAddress}" is not a wallet address (it looks like a token account or program address).`);
+    console.error("Ask the recipient for their wallet address instead.");
+    process.exit(1);
+  }
+  return { to: toAddress, amount };
+}
+
+// Base fee (5000 lamports per signature) plus a margin for the priority fee.
+const SOLANA_FEE_ALLOWANCE = 0.0001;
+
+async function cmdSendSol(toAddress?: string, amountStr?: string, profileName?: string, priorityFee = DEFAULT_PRIORITY_FEE) {
+  const { to, amount } = parseSendArgs("send-sol", toAddress, amountStr);
+  const profile = requireProfile(resolveProfileName(profileName));
+  requireChain(profile, "solana", "send-sol");
+
+  const connection = buildConnection();
+  const balance = await getSolBalance(connection, profile.address);
+  if (amount + SOLANA_FEE_ALLOWANCE > balance) {
+    console.error(`Not enough SOL. Balance ${balance}, need ${amount} plus ~${SOLANA_FEE_ALLOWANCE} for fees.`);
+    process.exit(1);
+  }
+  // An address that has never held SOL has to be funded above the rent-exempt
+  // minimum, or the network rejects the transfer.
+  const recipientBalance = await getSolBalance(connection, to);
+  const rentMin = await rentExemptMinimum(connection);
+  if (recipientBalance === 0 && amount < rentMin) {
+    console.error(`The recipient account is empty, so the first transfer must be at least ${rentMin} SOL.`);
+    process.exit(1);
+  }
+
+  const keypair = keypairFromSecret(getPrivateKeyPlaintext(profile));
+  const signature = await sendSol(connection, keypair, to, amount, priorityFee);
+  console.log(`Sent ${amount} SOL from profile "${profile.name}" (${profile.address})`);
+  console.log(`  Signature: ${signature}`);
+}
+
+async function cmdSendUsdc(toAddress?: string, amountStr?: string, profileName?: string, priorityFee = DEFAULT_PRIORITY_FEE) {
+  const profile = requireProfile(resolveProfileName(profileName));
+  requireChain(profile, "solana", "send-usdc");
+  await sendSolanaToken(profile, "USDC", toAddress, amountStr, priorityFee);
+}
+
+async function sendSolanaToken(
+  profile: Profile,
+  token: SolanaToken,
+  toAddress: string | undefined,
+  amountStr: string | undefined,
+  priorityFee: number
+) {
+  const { to, amount } = parseSendArgs(`send-${token.toLowerCase()}`, toAddress, amountStr);
+
+  const connection = buildConnection();
+  const [tokenBalance, solBalance] = await Promise.all([
+    getTokenBalance(connection, profile.address, token),
+    getSolBalance(connection, profile.address),
+  ]);
+  if (amount > tokenBalance) {
+    console.error(`Not enough ${token}. Balance ${tokenBalance}.`);
+    process.exit(1);
+  }
+  // Fees are paid in SOL; a first-time recipient also needs its token account
+  // created, which costs ~0.002 SOL of rent.
+  if (solBalance < SOLANA_FEE_ALLOWANCE) {
+    console.error(`Account holds ${solBalance} SOL — not enough to pay the network fee. Fund it with a little SOL.`);
+    process.exit(1);
+  }
+
+  const keypair = keypairFromSecret(getPrivateKeyPlaintext(profile));
+  const result = await sendToken(connection, keypair, to, token, amount, priorityFee);
+  console.log(`Sent ${amount} ${token} from profile "${profile.name}" (${profile.address})`);
+  if (result.createdRecipientAccount) {
+    console.log(`  Created the recipient's ${token} token account (~0.002 SOL rent, paid by you).`);
+  }
+  console.log(`  Signature: ${result.signature}`);
 }
 
 interface SwapOptions {
@@ -513,6 +692,7 @@ async function cmdSwap(direction: SwapDirection, amountStr?: string, options?: S
 
   const name = resolveProfileName(opts.profile);
   const profile = requireProfile(name);
+  requireChain(profile, "tron", "swap");
 
   if (opts.quoteOnly) {
     const tronWeb = buildTronWeb();
@@ -609,6 +789,16 @@ function hasFlag(args: string[], flag: string): { present: boolean; rest: string
   return { present: true, rest };
 }
 
+function parsePriorityFee(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_PRIORITY_FEE;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    console.error("--priority-fee must be a whole number of micro-lamports (0 or more).");
+    process.exit(1);
+  }
+  return value;
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const [command, sub, ...rest] = argv;
@@ -616,12 +806,16 @@ async function main() {
   try {
     if (command === "profile") {
       switch (sub) {
-        case "add":
-          cmdProfileAdd(rest[0]);
+        case "add": {
+          const { value: chainFlag, rest: rest2 } = extractFlag(rest, "--chain");
+          cmdProfileAdd(rest2[0], parseChain(chainFlag));
           break;
-        case "import":
-          cmdProfileImport(rest[0], rest[1]);
+        }
+        case "import": {
+          const { value: chainFlag, rest: rest2 } = extractFlag(rest, "--chain");
+          cmdProfileImport(rest2[0], rest2[1], parseChain(chainFlag));
           break;
+        }
         case "list":
           cmdProfileList();
           break;
@@ -712,7 +906,21 @@ async function main() {
           process.exit(1);
         }
       }
-      await cmdSendUsdt(rest3[0], rest3[1], profileFlag, feeLimit);
+      const { value: priorityFlag, rest: rest4 } = extractFlag(rest3, "--priority-fee");
+      await cmdSendUsdt(rest4[0], rest4[1], {
+        profile: profileFlag,
+        feeLimit,
+        priorityFee: parsePriorityFee(priorityFlag),
+      });
+      return;
+    }
+
+    if (command === "send-sol" || command === "send-usdc") {
+      const args = [sub, ...rest].filter(Boolean) as string[];
+      const { value: profileFlag, rest: rest2 } = extractFlag(args, "--profile");
+      const { value: priorityFlag, rest: rest3 } = extractFlag(rest2, "--priority-fee");
+      const send = command === "send-sol" ? cmdSendSol : cmdSendUsdc;
+      await send(rest3[0], rest3[1], profileFlag, parsePriorityFee(priorityFlag));
       return;
     }
 
