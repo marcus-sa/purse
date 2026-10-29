@@ -67,6 +67,9 @@ bun index.ts send-usdt <toAddress> <amount>
 bun index.ts send-trx <toAddress> <amount> --profile alice
 bun index.ts send-usdt <toAddress> <amount> --profile alice
 
+# Raise or lower the most TRX a USDT send may burn on energy (default 50)
+bun index.ts send-usdt <toAddress> <amount> --fee-limit 30
+
 # Check the current rate without swapping anything
 bun index.ts swap trx-usdt 100 --quote
 
@@ -240,8 +243,10 @@ tron-wallet profile list
 
 - New addresses need a small amount of TRX before sending anything, since
   Tron transactions consume TRX for bandwidth/energy.
-- `feeLimit` in send-usdt is a cap, not a fixed cost — typical TRC-20
-  transfers burn a few TRX worth of energy unless the account has
-  pre-staked energy. Swaps use a higher cap (100 TRX) because they touch
+- `--fee-limit` in send-usdt is a cap, not a fixed cost — you only pay
+  for the energy actually used. Without staked energy a USDT transfer burns
+  ~65k energy (~130k to an address that has never held USDT), which can
+  cost well over 10 TRX; if the cap is too low the transfer reverts with
+  `OUT_OF_ENERGY` and the burned TRX is still lost. Swaps use a higher cap (100 TRX) because they touch
   the router, the pool and the TRX wrapper in one transaction.
 - Never commit `.env`, the SQLite DB file, or logs containing revealed keys.

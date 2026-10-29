@@ -19,7 +19,7 @@
  *   bun index.ts balance [name]                 (defaults to active profile)
  *   bun index.ts transactions [name] [--limit N] [--all] [--type trx|usdt|trc20|all] [--json]
  *   bun index.ts send-trx <to> <amount> [--profile name]
- *   bun index.ts send-usdt <to> <amount> [--profile name]
+ *   bun index.ts send-usdt <to> <amount> [--fee-limit trx] [--profile name]
  *   bun index.ts swap <trx-usdt|usdt-trx> <amount> [--slippage n] [--quote]
  *
  * Env vars:
@@ -94,7 +94,9 @@ Wallet commands:
       --json                            Print raw JSON instead of a table
       --profile <name>                  Profile to use
   send-trx <to> <amount> [--profile name]
-  send-usdt <to> <amount> [--profile name]
+  send-usdt <to> <amount> [options]
+      --fee-limit <trx>                 Max TRX to burn on energy (default ${DEFAULT_USDT_FEE_LIMIT})
+      --profile <name>                  Profile to use
   swap <trx-usdt|usdt-trx> <amount> [options]
       --quote                           Print the current rate without swapping
       --slippage <percent>              Max acceptable slippage (default 0.5)
@@ -449,9 +451,21 @@ async function cmdSendTrx(toAddress?: string, amountStr?: string, profileName?: 
   console.log(JSON.stringify(tx, null, 2));
 }
 
-async function cmdSendUsdt(toAddress?: string, amountStr?: string, profileName?: string) {
+// Fee limit is a ceiling, not a spend. With nothing staked, a USDT transfer
+// burns ~65k energy (~130k to a never-funded recipient), which can exceed
+// 10 TRX — a lower cap makes transfers revert with OUT_OF_ENERGY.
+const DEFAULT_USDT_FEE_LIMIT = 50;
+// Protocol maximum for fee_limit.
+const MAX_FEE_LIMIT = 15_000;
+
+async function cmdSendUsdt(
+  toAddress?: string,
+  amountStr?: string,
+  profileName?: string,
+  feeLimitTrx = DEFAULT_USDT_FEE_LIMIT
+) {
   if (!toAddress || !amountStr) {
-    console.error("Usage: send-usdt <toAddress> <amount> [--profile name]");
+    console.error("Usage: send-usdt <toAddress> <amount> [--fee-limit trx] [--profile name]");
     process.exit(1);
   }
   const amount = parseFloat(amountStr);
@@ -469,7 +483,7 @@ async function cmdSendUsdt(toAddress?: string, amountStr?: string, profileName?:
   const amountInSmallestUnit = Math.round(amount * 1_000_000); // USDT has 6 decimals
 
   const tx = await contract.methods.transfer(toAddress, amountInSmallestUnit).send({
-    feeLimit: 10_000_000,
+    feeLimit: Math.round(feeLimitTrx * 1_000_000),
   });
   console.log(`Sent from profile "${profile.name}" (${profile.address})`);
   console.log("Transaction ID:", tx);
@@ -689,7 +703,16 @@ async function main() {
     if (command === "send-usdt") {
       const args = [sub, ...rest].filter(Boolean) as string[];
       const { value: profileFlag, rest: rest2 } = extractFlag(args, "--profile");
-      await cmdSendUsdt(rest2[0], rest2[1], profileFlag);
+      const { value: feeLimitFlag, rest: rest3 } = extractFlag(rest2, "--fee-limit");
+      let feeLimit = DEFAULT_USDT_FEE_LIMIT;
+      if (feeLimitFlag !== undefined) {
+        feeLimit = parseFloat(feeLimitFlag);
+        if (Number.isNaN(feeLimit) || feeLimit <= 0 || feeLimit > MAX_FEE_LIMIT) {
+          console.error(`--fee-limit must be a number of TRX between 0 and ${MAX_FEE_LIMIT}.`);
+          process.exit(1);
+        }
+      }
+      await cmdSendUsdt(rest3[0], rest3[1], profileFlag, feeLimit);
       return;
     }
 
