@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "tron-wallet-cli-bun",
+      "name": "purse",
       "dependencies": {
         "@solana/spl-token": "^0.4.15",
         "@solana/web3.js": "^1.99.0",

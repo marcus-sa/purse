@@ -1,4 +1,4 @@
-# tron-wallet-cli (Bun edition)
+# purse
 
 Multi-profile Tron + Solana wallet CLI using Bun and `bun:sqlite`. Generate
 keypairs, store multiple named profiles locally, and send TRX / TRC-20 USDT
@@ -14,9 +14,11 @@ cp .env.example .env
 # optionally set SOLANA_RPC_URL to a dedicated Solana RPC provider
 ```
 
-Profiles are stored in a local SQLite DB at `~/.tron-wallet-cli/wallet.db`
-by default. Override the location with `WALLET_DATA_DIR` — see
-[Storing the DB on Proton Drive](#storing-the-db-on-proton-drive-macos) below.
+Profiles are stored in a local SQLite DB at `~/.purse/wallet.db` by default
+(or `~/.tron-wallet-cli/wallet.db` if that folder exists from before the
+rename and `~/.purse` doesn't). Override the location with `WALLET_DATA_DIR`
+— see [Storing the DB on Proton Drive](#storing-the-db-on-proton-drive-macos)
+below.
 
 ## Profile management
 
@@ -209,11 +211,11 @@ Proton Drive handles the sync in the background.
 
 2. Point the CLI at a subfolder there, e.g. in your `.env`:
    ```
-   WALLET_DATA_DIR=/Users/yourname/Library/CloudStorage/ProtonDrive-you@proton.me/My files/tron-wallet-cli
+   WALLET_DATA_DIR=/Users/yourname/Library/CloudStorage/ProtonDrive-you@proton.me/My files/purse
    ```
    or export it in your shell profile:
    ```bash
-   export WALLET_DATA_DIR="$HOME/Library/CloudStorage/ProtonDrive-you@proton.me/My files/tron-wallet-cli"
+   export WALLET_DATA_DIR="$HOME/Library/CloudStorage/ProtonDrive-you@proton.me/My files/purse"
    ```
 
 3. Run any command as usual — the `wallet.db` file will be created there and
@@ -263,7 +265,7 @@ keys separately.
 ```bash
 export WALLET_MASTER_KEY="current passphrase"
 export WALLET_NEW_MASTER_KEY="new passphrase, 16+ characters"
-tron-wallet rekey
+purse rekey
 ```
 
 `rekey` copies the DB to `backups/wallet-<timestamp>.db`, decrypts every profile
@@ -280,13 +282,13 @@ under the old one.
 ```bash
 chmod +x index.ts
 bun link
-tron-wallet profile list
+purse profile list
 ```
 
 ## Notes
 
-- New addresses need a small amount of TRX before sending anything, since
-  Tron transactions consume TRX for bandwidth/energy.
+- New addresses need a small amount of the chain's native coin before sending
+  anything: TRX on Tron (bandwidth/energy), SOL on Solana (network fees).
 - `--fee-limit` in send-usdt is a cap, not a fixed cost — you only pay
   for the energy actually used. Without staked energy a USDT transfer burns
   ~65k energy (~130k to an address that has never held USDT), which can

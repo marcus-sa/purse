@@ -1,11 +1,11 @@
 {
-  "name": "tron-wallet-cli-bun",
+  "name": "purse",
   "version": "1.0.0",
   "description": "Multi-profile Tron + Solana wallet CLI (Bun + bun:sqlite) for generating keypairs and sending TRX, SOL and USDT/USDC",
   "module": "index.ts",
   "type": "module",
   "bin": {
-    "tron-wallet": "./index.ts"
+    "purse": "./index.ts"
   },
   "scripts": {
     "start": "bun index.ts"

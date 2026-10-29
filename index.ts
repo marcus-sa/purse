@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * tron-wallet-cli (Bun edition)
+ * purse
  *
  * Multi-profile Tron + Solana wallet CLI backed by bun:sqlite. Each profile
  * belongs to one chain; commands act on the chain of the profile they use.
@@ -32,7 +32,7 @@
  *   TRON_FULL_HOST      optional, defaults to https://api.trongrid.io
  *   TRONGRID_API_HOST   optional, host for the v1 REST API (tx history)
  *   SOLANA_RPC_URL      optional, defaults to https://api.mainnet-beta.solana.com
- *   WALLET_DATA_DIR     optional, defaults to ~/.tron-wallet-cli
+ *   WALLET_DATA_DIR     optional, defaults to ~/.purse (or ~/.tron-wallet-cli if that exists)
  */
 
 import {
@@ -93,7 +93,7 @@ import {
 
 function printUsage() {
   console.log(`
-tron-wallet-cli (Bun) — DB: ${DB_PATH}
+purse — DB: ${DB_PATH}
 
 Profile commands:
   profile add <name> [--chain c]      Generate a new keypair (chain: tron or solana, default tron)

@@ -3,9 +3,15 @@ import { homedir } from "os";
 import { join } from "path";
 import { mkdirSync, existsSync } from "fs";
 
-// Store the DB in ~/.tron-wallet-cli/wallet.db by default so it's not tied
-// to whatever directory you happen to run the command from.
-const DATA_DIR = process.env.WALLET_DATA_DIR || join(homedir(), ".tron-wallet-cli");
+// Store the DB in ~/.purse/wallet.db by default so it's not tied to whatever
+// directory you happen to run the command from. Before the rename to purse the
+// default was ~/.tron-wallet-cli; keep using it when that is where the data is,
+// rather than silently starting an empty wallet.
+const LEGACY_DATA_DIR = join(homedir(), ".tron-wallet-cli");
+const DEFAULT_DATA_DIR = join(homedir(), ".purse");
+const DATA_DIR =
+  process.env.WALLET_DATA_DIR ||
+  (!existsSync(DEFAULT_DATA_DIR) && existsSync(LEGACY_DATA_DIR) ? LEGACY_DATA_DIR : DEFAULT_DATA_DIR);
 if (!existsSync(DATA_DIR)) {
   mkdirSync(DATA_DIR, { recursive: true });
 }
